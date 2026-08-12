@@ -18,6 +18,12 @@ type Boleto struct {
 	DueDate           time.Time
 	Amount            float64
 	CodeType          BoletoCodeType
+	// Type is the boleto family (Bank, Sanitation, ElectricityAndGas, etc.),
+	// the same classification GetBoletoType returns. Populated by Parse for
+	// both bank and arrecadacao/convenio boletos so callers don't need a
+	// separate GetBoletoType call to know which fields are meaningful —
+	// e.g. IssuerBankCode/IssuerBankName are empty for non-Bank types.
+	Type BoletoType
 }
 
 var Banks = map[string]string{

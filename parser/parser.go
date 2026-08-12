@@ -16,26 +16,40 @@ const (
 	BaseDateFormat = "2006-01-02 15:04:05"
 )
 
-// Parse parses a digitable line or a barcode into a Boleto struct
+// Parse parses a digitable line or a barcode into a Boleto struct.
+// Routes to the bank-boleto parser or the arrecadacao/convenio parser
+// depending on GetBoletoType — the two families use unrelated field
+// layouts (see parseDigitableLine vs parseArrecadacaoBarcode) and mixing
+// them up silently produces plausible-looking but wrong data.
 func Parse(code string) (*utils.Boleto, error) {
 	line := utils.OnlyNumbers(code)
 
 	codeType, err := GetCodeType(line)
-
 	if err != nil {
 		return nil, err
 	}
 
-	if codeType == Barcode {
-		line = ConvertBarcodeToDigitableLine(line)
+	boletoType := GetBoletoType(line)
+
+	var boleto *utils.Boleto
+	if boletoType == utils.Bank || boletoType == utils.CreditCard {
+		bankLine := line
+		if codeType == Barcode {
+			bankLine = ConvertBarcodeToDigitableLine(bankLine)
+		}
+		boleto, err = parseDigitableLine(bankLine)
+	} else {
+		barcode44 := line
+		if len(line) == 48 {
+			barcode44 = convertArrecadacaoDigitableLineToBarcode(line)
+		}
+		boleto, err = parseArrecadacaoBarcode(barcode44)
 	}
-
-	boleto, err := parseDigitableLine(line)
-
 	if err != nil {
 		return nil, err
 	}
 
+	boleto.Type = boletoType
 	boleto.CodeType = codeType
 
 	return boleto, nil
@@ -117,17 +131,72 @@ func parseDigitableLine(line string) (*utils.Boleto, error) {
 	return &boleto, nil
 }
 
+// calculateDueDate converts the 4-digit "fator de vencimento" into a date.
+//
+// FEBRABAN communication FB-009/2023: the factor is days elapsed since a
+// base date, and the field is only 4 digits wide (max 9999). That ceiling
+// was reached on 2025-02-21, so from 2025-02-22 onward the factor restarts
+// at 1000 against a NEW base date (2025-02-22) instead of continuing to
+// count from the original 1997-10-07 base.
+//
+// This makes any factor >= 1000 genuinely ambiguous — the legacy rule was
+// never restricted to factors under 1000, so e.g. factor 9771 legitimately
+// meant 2024-07-08 under the old rule (confirmed against this library's own
+// pre-existing test fixtures) just as validly as it could mean 2049-02-27
+// under the new one. There is no way to tell which rule produced a given
+// factor from the digits alone.
+//
+// The two candidate dates for the same factor are always ~27 years apart
+// (9999 days) and fall on opposite sides of the 2025-02-22 cutover, so
+// picking whichever candidate is closer to "now" resolves the ambiguity
+// correctly for any boleto whose due date isn't wildly far from when it's
+// actually being parsed — true both for freshly-issued boletos (which are
+// always close to the real "now") and, empirically, for this library's own
+// historical test fixtures (2018-2024 dates, still far closer to a 2026
+// "now" than their new-rule alternates would be). This assumption only
+// breaks down decades from now, near the eventual next overflow — same
+// category of temporal assumption the factor scheme itself already makes.
+const (
+	NewBaseDate       = "2025-02-22 00:00:00"
+	NewBaseDateOffset = 1000
+)
+
 func calculateDueDate(dueDateStr string) (time.Time, error) {
-	dueDate, err := strconv.Atoi(dueDateStr)
+	factor, err := strconv.Atoi(dueDateStr)
 	if err != nil {
 		return time.Time{}, err
 	}
 
-	dateFactor, err := time.Parse(BaseDateFormat, utils.BaseDate)
+	legacyBase, err := time.Parse(BaseDateFormat, utils.BaseDate)
 	if err != nil {
 		return time.Time{}, err
 	}
-	return dateFactor.AddDate(0, 0, dueDate), nil
+	legacyDate := legacyBase.AddDate(0, 0, factor)
+
+	if factor < NewBaseDateOffset {
+		// Structurally impossible under the new rule (which starts at
+		// 1000) — unambiguously legacy, including the factor=0 sentinel.
+		return legacyDate, nil
+	}
+
+	newBase, err := time.Parse(BaseDateFormat, NewBaseDate)
+	if err != nil {
+		return time.Time{}, err
+	}
+	newDate := newBase.AddDate(0, 0, factor-NewBaseDateOffset)
+
+	now := time.Now()
+	if abs(now.Sub(newDate)) < abs(now.Sub(legacyDate)) {
+		return newDate, nil
+	}
+	return legacyDate, nil
+}
+
+func abs(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 func parseAmount(amountStr string) (float64, error) {
