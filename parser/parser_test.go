@@ -297,6 +297,31 @@ func TestValues_Parse(t *testing.T) {
 	}
 }
 
+// TestValues_Parse_HistoricalDueDateFactor is an explicit regression test
+// for the ambiguity calculateDueDate resolves: a factor >= 1000 could be
+// either a legacy-rule date (any time before 2025-02-22) or a current-rule
+// date, and both are structurally valid. This uses a real bank boleto
+// (same barcode as the "current bill" fixtures elsewhere in this suite)
+// with only its due-date factor field changed to 8287 — the correct
+// legacy-rule factor for 2020-06-15 — to confirm that decoding a
+// genuinely historical boleto today still resolves to its real historical
+// date rather than drifting to the ~2045 date the same factor would mean
+// under the current rule. This is distinct from the other historical
+// fixtures in this file (which predate this fix and just happen to still
+// pass) — this one exists specifically to catch a future regression where
+// "closest to now" stops correctly favoring old dates for old boletos.
+func TestValues_Parse_HistoricalDueDateFactor(t *testing.T) {
+	loc, _ := time.LoadLocation("UTC")
+	boleto, err := Parse("23790001169300213413394026080302482870000066271")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := time.Date(2020, 6, 15, 0, 0, 0, 0, loc)
+	if !boleto.DueDate.Equal(want) {
+		t.Errorf("DueDate = %v, want %v (a historical boleto parsed today must keep its real date, not drift to the current-rule interpretation of the same factor)", boleto.DueDate, want)
+	}
+}
+
 func TestValues_GetBoletoType(t *testing.T) {
 	tests := []struct {
 		input string
